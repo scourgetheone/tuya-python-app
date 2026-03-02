@@ -1,0 +1,7 @@
+build/
+dist/
+**/*.swp
+**/*.pyc
+**/__pycache__/
+tuya_python_app.egg-info/
+.vim/

@@ -1,0 +1,19 @@
+{
+    "_comment": "See this document on how to use this cSpell configuration file: https://github.com/iamcco/coc-spell-checker?tab=readme-ov-file#configuration-settings",
+    "version": "0.2",
+    "language": "en",
+    "ignoreWords": [
+        "api's",
+        "ewelink",
+        "ewelink's",
+        "ewelinks",
+        "limsongyu",
+        "meteo",
+        "minh",
+        "open"
+    ],
+    "allowCompoundWords": false,
+    "ignorePaths": [
+        "test.py"
+    ]
+}

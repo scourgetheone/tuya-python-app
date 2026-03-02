@@ -1,0 +1,45 @@
+[
+    {
+        "name": "\u0110\u00e8n \u0111\u01b0\u1eddng khu Ni",
+        "id": "a332b5647ba3930086voju",
+        "key": "(E{NL@4wx}$958Us",
+        "mac": "50:8a:06:51:c3:93",
+        "uuid": "599b9544bdb74a74",
+        "category": "cz",
+        "product_name": "\u1ed4 c\u1eafm \u0111\u01a1n th\u00f4ng minh V2",
+        "product_id": "rpvbmmhxjekuildw",
+        "biz_type": 0,
+        "model": "\u1ed4 c\u1eafm \u0111\u01a1n th\u00f4ng minh V2",
+        "sub": false,
+        "icon": "https://images.iotbing.com/smart/icon/ay15317909071177zKnI/07f8ae3d4c8f57451521a88005f8c382.png",
+        "mapping": {
+            "1": {
+                "code": "switch_1",
+                "type": "Boolean",
+                "values": {}
+            },
+            "9": {
+                "code": "countdown_1",
+                "type": "Integer",
+                "values": {
+                    "unit": "s",
+                    "min": 0,
+                    "max": 86400,
+                    "scale": 0,
+                    "step": 1
+                }
+            },
+            "38": {
+                "code": "relay_status",
+                "type": "Enum",
+                "values": {
+                    "range": [
+                        "off",
+                        "on",
+                        "memory"
+                    ]
+                }
+            }
+        }
+    }
+]
