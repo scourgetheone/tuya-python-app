@@ -1,14 +1,22 @@
+import datetime
 import enum
 import json
 from typing import Annotated
 
+import requests
 import typer
 from tuya_python import tuya
 
 
 class SwitchState(enum.Enum):
-    on = True
-    off = False
+    on = "on"
+    off = "off"
+
+
+class TimerType(enum.Enum):
+    normal = "normal"
+    sunset = "sunset"
+    sunrise = "sunrise"
 
 
 def get_device_switch_state(status):
@@ -30,12 +38,14 @@ def get_device_info(device_id):
     return None
 
 
-def get_switch_command(switch_state: bool):
+def get_switch_command(switch_state: SwitchState):
     return {
         "commands": [
             {
                 "code": "switch_1",  # Or use the DP ID if 'switch_1' fails
-                "value": switch_state,  # True for ON, False for OFF
+                "value": True
+                if switch_state == SwitchState.on
+                else False,  # True for ON, False for OFF
             }
         ]
     }
@@ -114,7 +124,7 @@ def init_app(app: typer.Typer):
             if not info:
                 print(f"No device found with ID {device_id}")
                 raise typer.Abort()
-            devices[device_id] = {"id": device_id, "name": info["name"]}
+            devices[device_id] = dict()
         else:
             _devices = tuya.cloud_connection.getdevices()
             if isinstance(_devices, list):
@@ -123,22 +133,20 @@ def init_app(app: typer.Typer):
                     f"Found a total of {len(_devices)} device(s)"
                 )
                 for device in _devices:
-                    devices[device["id"]] = device
+                    devices[device["id"]] = dict()
 
         for _device_id, device in devices.items():
-            print(f"Timers for device {device['name']}:")
+            print(f"Timers for device {_device_id}:")
             endpoint = f"/v2.0/cloud/timer/device/{_device_id}"
             timers = tuya.cloud_connection.cloudrequest(endpoint, "GET")
             if "result" in timers:
                 for timer in timers["result"]:
                     print(f"{json.dumps(timer, indent=2)}")
-                    device["timers"][timer.get("alias_name") or timer["timer_id"]] = (
-                        timer
-                    )
-            else:
-                device["timers"] = dict()
-            devices[_device_id] = device
-            print(f"Listed {len(timers['result'])} timer(s) for {device['name']}")
+                    devices[_device_id][
+                        timer.get("alias_name") or timer["timer_id"]
+                    ] = timer
+
+            print(f"Listed {len(timers['result'])} timer(s) for {_device_id}")
             print("------------")
 
         return devices
@@ -155,17 +163,46 @@ def init_app(app: typer.Typer):
             [{"device_id": "ID", "timers": "12:12-on", "15:30-off"}]
         """
         print("Listing local timer configuration")
-        local_timers = tuya.CONFIG.get("timers")
+        local_timers = tuya.CONFIG.get("device_timers")
         if not local_timers:
             print("ERROR: No local timer configuration defined in the config file!")
             raise typer.Abort()
 
-        for timer in local_timers:
-            if not device_id or device_id == timer["device_id"]:
-                print(json.dumps(timer, indent=2))
-            if device_id == timer["device_id"]:
-                return timer
-        return local_timers
+        timers = dict()
+
+        for device_timers in local_timers:
+            _device_id = device_timers["device_id"]
+            if _device_id not in timers:
+                timers[_device_id] = dict()
+            # If device_id is given, then only fetch timers from that device,
+            # otherwise fetch timers of all devices found in the config
+            if not device_id or device_id == _device_id:
+                print(json.dumps(device_timers, indent=2))
+                for timer in device_timers["timers"]:
+                    timers[_device_id][timer["name"]] = timer
+
+        return timers
+
+    def timer_diff_check(local_timer: dict, cloud_timer: dict):
+        """
+        Checks for differences between the local timer and cloud timer
+
+        Args:
+            local_timer: the timer as defined in the config file
+            cloud_timer: the timer fetched from the cloud
+
+        Returns:
+            dictionary of keys that have differing values
+        """
+        keys_to_check = ("time", "loops")
+        diff = dict()
+        for key in keys_to_check:
+            if cloud_timer[key] != local_timer[key]:
+                print(
+                    f"Diff found: cloud_timer[{key}] ({cloud_timer[key]}) != local_timer[{key}] ({local_timer[key]})"
+                )
+                diff[key] = {"cloud": cloud_timer[key], "local": local_timer[key]}
+        return diff
 
     @device_timers_app.command()
     def apply(
@@ -187,7 +224,7 @@ def init_app(app: typer.Typer):
         # configuration from the TOML config file
         local_timers = get_local_timers_list(device_id)
         # The current state of the timers from the cloud
-        current_timers = get_cloud_timers_list(device_id)
+        cloud_timers = get_cloud_timers_list(device_id)
 
         # 2. We then compare between the SOT timers in the config and the cloud
         # timers. We will the reconcile the differences by creating, deleting,
@@ -196,13 +233,96 @@ def init_app(app: typer.Typer):
         to_delete = dict()
         to_update = dict()
 
+        # Create locally defined timers in the cloud that does not exist yet
+        for device_id in local_timers.keys():
+            if device_id not in cloud_timers:
+                print(
+                    f"Device {device_id} does not exist in the cloud! Please"
+                    " double-check the device ID as it may be incorrect, or you"
+                    " have not added the device to the Tuya Cloud project."
+                )
+                continue
+
+            for name, local_timer in local_timers[device_id].items():
+                if name not in cloud_timers[device_id]:
+                    print(
+                        f"{name} does not exist in the cloud! Adding to to_create list"
+                    )
+                    if device_id not in to_create:
+                        to_create[device_id] = dict()
+                    to_create[device_id][name] = local_timer
+                else:
+                    # Check for differences and update cloud timer if needed
+                    diff = timer_diff_check(local_timer, cloud_timers[device_id][name])
+                    if diff:
+                        if device_id not in to_update:
+                            to_update[device_id] = dict()
+                        to_update[device_id][name] = local_timer
+
+        # Delete cloud timers not defined in the local timer config
+        for device_id in cloud_timers.keys():
+            if device_id not in local_timers:
+                print(
+                    f"Device {device_id} is not defined in the config! Will not do"
+                    " anything with this device."
+                )
+                continue
+
+            for name, cloud_timer in cloud_timers[device_id].items():
+                if name not in local_timers[device_id]:
+                    print(
+                        f"Timer {name} is not defined locally for device"
+                        f" {device_id}! Adding to to_delete list"
+                    )
+                    if device_id not in to_delete:
+                        to_delete[device_id] = dict()
+                    to_delete[device_id][name] = cloud_timer
+
+        if to_delete:
+            for device_id, timers in to_delete.items():
+                print(f"Now deleting {len(timers.keys())} timers from {device_id}")
+                timer_ids = list()
+                for timer in timers.values():
+                    timer_ids.append(timer["timer_id"])
+                delete(device_id, timer_ids)
+
+        if to_create:
+            for device_id, timers in to_create.items():
+                print(f"Now creating {len(timers.keys())} timers from {device_id}")
+                for timer in timers.values():
+                    create(
+                        device_id,
+                        **timer,
+                    )
+
+    def get_astronomical_time(time: str, type: TimerType) -> str:
+        """
+        Gets sunrise and sunset times from OpenMeteo
+
+        Args:
+            time: the time offset given in the format: "+5" where the first
+                character tells if the time offset should add "+" or subtract "-"
+                from the sunset/sunrise rimes. After the offset character is the
+                time offset expressed in minutes
+            type: the type of timer. Valid values are TimerType.sunset and
+                TimerType.sunrise
+        """
+        weather_data = requests.get(
+            "https://api.open-meteo.com/v1/forecast?latitude=21.7229&longitude=104.9113&hourly=temperature_2m,precipitation_probability,precipitation,cloud_cover&daily=sunrise,sunset&timezone=Asia%2FBangkok&forecast_days=1"
+        ).json()
+        suntime = datetime.datetime.fromisoformat(weather_data["daily"][type.value][0])
+
+        time = float(time)
+        time_obj = suntime + datetime.timedelta(minutes=time)
+
+        breakpoint()
+        return time_obj.strftime("%H:%M")
+
     @device_timers_app.command()
     def create(
         device_id: Annotated[str, typer.Argument(help="The device ID")],
-        timer_name: Annotated[
-            str, typer.Argument(help="Name of the timer. Must be unique")
-        ],
-        time_str: Annotated[str, typer.Argument(help="Time in HH:MM format")],
+        name: Annotated[str, typer.Argument(help="Name of the timer. Must be unique")],
+        time: Annotated[str, typer.Argument(help="Time in HH:MM format")],
         switch: Annotated[
             SwitchState,
             typer.Argument(help="Switch the device on (True) or off (False)"),
@@ -214,23 +334,31 @@ def init_app(app: typer.Typer):
                 " Example: 1111111 means the timer will run every day of the week"
             ),
         ] = "1111111",
+        type: Annotated[
+            TimerType, typer.Option(help="Type of timer")
+        ] = TimerType.normal,
     ):
         endpoint = f"/v2.0/cloud/timer/device/{device_id}"
+        if isinstance(type, str):
+            type = TimerType[type]
+        if type != TimerType.normal:
+            time = get_astronomical_time(time, type)
         payload = {
-            "alias_name": timer_name,
+            "alias_name": name,
             "loops": loops,
             "is_app_push": True,
             "category": "category_power",
             "timezone_id": "Asia/Ho_Chi_Minh",
-            "functions": [{"code": "switch_1", "value": switch.value}],
-            "time": time_str,
+            "functions": [
+                {"code": "switch_1", "value": True if switch == "on" else False}
+            ],
+            "time": time,
         }
 
         resp = tuya.cloud_connection.cloudrequest(endpoint, action="POST", post=payload)
         if resp["success"]:
             print("Timer successfully created!")
         print(json.dumps(resp, indent=2))
-        get_cloud_timers_list(device_id)
 
     @device_timers_app.command()
     def modify(
