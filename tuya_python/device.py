@@ -197,11 +197,15 @@ def init_app(app: typer.Typer):
         keys_to_check = ("time", "loops")
         diff = dict()
         for key in keys_to_check:
-            if cloud_timer[key] != local_timer[key]:
+            cloud = cloud_timer[key]
+            local = local_timer[key]
+            if key == "time" and TimerType[local_timer["type"]] != TimerType.normal:
+                local = get_astronomical_time(local_timer[key], local_timer["type"])
+            if cloud != local:
                 print(
-                    f"Diff found: cloud_timer[{key}] ({cloud_timer[key]}) != local_timer[{key}] ({local_timer[key]})"
+                    f"Diff found for timer {local_timer['name']}: cloud_timer[{key}] ({cloud}) != local_timer[{key}] ({local})"
                 )
-                diff[key] = {"cloud": cloud_timer[key], "local": local_timer[key]}
+                diff[key] = {"cloud": cloud, "local": local}
         return diff
 
     @device_timers_app.command()
@@ -257,6 +261,10 @@ def init_app(app: typer.Typer):
                     if diff:
                         if device_id not in to_update:
                             to_update[device_id] = dict()
+                        # Save the timer_id so we can update the timer later
+                        local_timer["timer_id"] = cloud_timers[device_id][name][
+                            "timer_id"
+                        ]
                         to_update[device_id][name] = local_timer
 
         # Delete cloud timers not defined in the local timer config
@@ -295,6 +303,15 @@ def init_app(app: typer.Typer):
                         **timer,
                     )
 
+        if to_update:
+            for device_id, timers in to_update.items():
+                print(f"Now updating {len(timers.keys())} timers from {device_id}")
+                for timer in timers.values():
+                    modify(
+                        device_id,
+                        **timer,
+                    )
+
     def get_astronomical_time(time: str, type: TimerType) -> str:
         """
         Gets sunrise and sunset times from OpenMeteo
@@ -315,7 +332,6 @@ def init_app(app: typer.Typer):
         time = float(time)
         time_obj = suntime + datetime.timedelta(minutes=time)
 
-        breakpoint()
         return time_obj.strftime("%H:%M")
 
     @device_timers_app.command()
@@ -363,12 +379,12 @@ def init_app(app: typer.Typer):
     @device_timers_app.command()
     def modify(
         device_id: Annotated[str, typer.Argument(help="The device ID")],
-        time_str: Annotated[str, typer.Argument(help="Time in HH:MM format")],
+        time: Annotated[str, typer.Argument(help="Time in HH:MM format")],
         switch: Annotated[
             SwitchState,
             typer.Argument(help="Switch the device on (True) or off (False)"),
         ],
-        timer_name: Annotated[str, typer.Option(help="The name of the timer")] = "",
+        name: Annotated[str, typer.Option(help="The name of the timer")] = "",
         timer_id: Annotated[str, typer.Option(help="The ID of the timer")] = "",
         loops: Annotated[
             str,
@@ -377,6 +393,9 @@ def init_app(app: typer.Typer):
                 " Example: 1111111 means the timer will run every day of the week"
             ),
         ] = "1111111",
+        type: Annotated[
+            TimerType, typer.Option(help="Type of timer")
+        ] = TimerType.normal,
     ):
         """
         Modify an existing timer. At least one of the timer identifiers,
@@ -389,19 +408,23 @@ def init_app(app: typer.Typer):
             timer_name: the name of the timer we want to modify
             timer_id: the id of the timer we want to modify
         """
-        if not timer_name and not timer_id:
+        if isinstance(type, str):
+            type = TimerType[type]
+        if type != TimerType.normal:
+            time = get_astronomical_time(time, type)
+        if not name and not timer_id:
             print("Either timer_name or timer_id must be given!")
             raise typer.Abort()
 
         # get the timer_id by it's name
-        if timer_name and not timer_id:
+        if name and not timer_id:
             timers = get_cloud_timers_list(device_id)
-            for name, timer in timers[device_id]["timers"].items():
-                if name == timer_name:
+            for _name, timer in timers[device_id].items():
+                if _name == name:
                     timer_id = timer["timer_id"]
 
         if not timer_id:
-            print(f"No timer found with given name {timer_name}")
+            print(f"No timer found with given name {name}")
             raise typer.Abort()
 
         endpoint = f"/v2.0/cloud/timer/device/{device_id}"
@@ -411,7 +434,7 @@ def init_app(app: typer.Typer):
             "category": "category_power",
             "timezone_id": "Asia/Ho_Chi_Minh",
             "functions": [{"code": "switch_1", "value": switch.value}],
-            "time": time_str,
+            "time": time,
         }
 
         resp = tuya.cloud_connection.cloudrequest(
